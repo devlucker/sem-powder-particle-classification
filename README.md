@@ -1,81 +1,246 @@
-# Powder Particle Classification with Scanning Electron Microscopy Images using Machine Learning Techniques
+# SEM Powder Particle Classification
 
-This repository contains the essential files for the classification and analysis of powder particles using SEM images and machine learning techniques, as described in the article *"Powder Particle Classification with Scanning Electron Microscopy Images Using Machine Learning Techniques"*.
-It classifies powder materials and alloys from Scanning Electron Microscopy (SEM) images using image processing, particle features, and deep learning.
+An image-analysis project for classifying metal powder materials from Scanning Electron Microscopy (SEM) images. It combines the original research notebooks and datasets with a browser-based application for material classification, particle inspection, and model evaluation.
 
-## Key Files:
+> **Important:** This project is for research and demonstration. Its predictions, particle measurements, and material/specification labels are not certified measurements or evidence of medical, manufacturing, or regulatory compliance. Verify results using validated laboratory methods and qualified personnel.
 
-- **Cropping.ipynb**: A Jupyter notebook for cropping labeled fragments from SEM images, enabling focused analysis of powder particles.
-- **Pipeline.ipynb**: Implements the HCF+PCA+XGBoost method for feature extraction and classification of powder particles.
-- **YOLO.ipynb**: A notebook dedicated to training the YOLOv8 model for particle classification in SEM images.
-- **contour_coordinates_Al.csv**: Contains the contour coordinates of particles from the AlSiMg powder.
-- **contour_coordinates_St.csv**: Contains the contour coordinates of particles from the 316L powder.
-- **contour_coordinates_Ti.csv**: Contains the contour coordinates of particles from the TiAlV powder.
-- **objects_summary_Al.xlsx**: Excel file summarizing the detected objects (particles) in SEM images for AlSiMg powder.
-- **objects_summary_St.xlsx**: Excel file summarizing the detected objects (particles) in SEM images for 316L powder.
-- **objects_summary_Ti.xlsx**: Excel file summarizing the detected objects (particles) in SEM images for TiAlV powder.
+## Contents
 
-## Folders:
+- [Materials and data](#materials-and-data)
+- [PowderScope web application](#powderscope-web-application)
+- [Model and feature pipeline](#model-and-feature-pipeline)
+- [Validation results](#validation-results)
+- [Installation and build](#installation-and-build)
+- [Using the web application](#using-the-web-application)
+- [HTTP API](#http-api)
+- [Repository guide](#repository-guide)
+- [Troubleshooting](#troubleshooting)
+- [Limitations](#limitations)
 
-- **train14**: Contains the best model configuration along with its statistics, providing the optimal setup for particle classification.
-- **SEM**: Contains the raw SEM images of powder particles, used for the classification tasks in the repository.
+## Materials and data
 
-This collection provides an end-to-end solution for powder particle classification, combining data preprocessing, model training, and post-processing analysis.
+The classifier recognizes three material labels:
 
-## PowderScope AI 2.0 web app
+| Dataset folder | Material label |
+| --- | --- |
+| `SEM/Al/` | AlSiMg |
+| `SEM/Steel/` | 316L Stainless Steel |
+| `SEM/Ti/` | TiAlV |
 
-The repository includes a modern web application for classifying the alloy material of uploaded Scanning Electron Microscopy (SEM) powder images across three additive manufacturing alloys: **AlSiMg**, **316L Stainless Steel**, and **TiAlV**.
+The included dataset has 15 labeled SEM images per material (45 images total). Each directory is a class: the training script infers the label from the directory name and uses image files in that directory as examples. The default trainer accepts `.jpg`, `.jpeg`, `.png`, `.tif`, and `.tiff` files.
 
-The updated model architecture achieves **95.56% 5-fold cross-validation accuracy** (up from the baseline 86.67%) utilizing a comprehensive 164-dimensional feature pipeline:
-- **GLCM (Gray-Level Co-occurrence Matrix)**: Haralick texture descriptors (contrast, dissimilarity, homogeneity, energy, correlation) computed across multiple pixel offsets and angles.
-- **2D Fast Fourier Transform (FFT)**: Radial frequency power spectrum energy distributions distinguishing fine versus coarse powder textures.
-- **Gabor Filter Banks**: Multi-orientation and multi-wavelength filters capturing microstructural directional grain patterns.
-- **Sobel & Canny Gradients**: Gradient magnitude statistics, quantiles, and edge density at multiple thresholds.
-- **Shape Moments & Spatial Descriptors**: Hu moments and Local Binary Patterns (LBP) capturing particle boundary curvature.
-- **Calibrated Ensemble Classifier**: Standard-scaled soft-voting ensemble combining Calibrated Ridge Classifier, Logistic Regression, and Linear Support Vector Machine (SVM).
+For custom training data, keep the three folder names and add correctly labeled images to each folder. The trainer requires at least five images in each class for its five-fold stratified cross-validation. More representative, diverse examples are recommended; simply adding many near-duplicate crops can give an overly optimistic estimate.
 
-### Build and run locally
+## PowderScope web application
 
-Use Python 3.10 or newer (tested on Python 3.13). The frontend is served directly from `static/`, so it does not need a separate Node.js build. The Python build process trains the image classifier and saves it to `artifacts/material_classifier.joblib`.
+The web application serves its HTML, CSS, and JavaScript directly from `static/` using the Python API server. There is no separate frontend build or Node.js installation.
 
-1. Clone the repository and enter its directory:
+### Features
 
-   ```powershell
-   git clone https://github.com/Odin531/sem-powder-particle-classification.git
-   cd sem-powder-particle-classification
-   ```
+- **Whole-image classification:** Select one of the trained classifiers to obtain a material estimate and class probabilities.
+- **Single-particle crop mode:** Submit an individual particle crop for a material estimate and particle measurements.
+- **Batch classification:** Upload up to 20 images in one batch, subject to a 50 MB total upload limit. The standard per-image prediction path accepts images up to 15 MB and 20 megapixels.
+- **Particle region proposals:** View automatically proposed regions, bounding boxes, centroids, areas, equivalent diameters, aspect ratios, and morphology labels. These are image-derived estimates, not calibrated physical measurements.
+- **Visual and feature explanations:** Inspect a Grad-CAM-style heatmap and feature-attribution waterfall generated by the application. These are diagnostic visualizations, not causal explanations.
+- **Evaluation dashboard:** Review the saved model metrics, per-class precision/recall/F1, and confusion matrices.
+- **Reference gallery:** Try images from the included SEM dataset without uploading a file.
+- **Out-of-distribution warning:** Predictions below the configured confidence threshold (0.65) can be marked as unknown/unrecognized. Confidence is not a guarantee of correctness.
 
-2. Create and activate a virtual environment, then install the dependencies:
+## Model and feature pipeline
 
-   ```powershell
-   py -3 -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   python -m pip install --upgrade pip
-   pip install -r requirements.txt
-   ```
+The web classifier extracts a 164-value feature vector from each image. It converts the image to grayscale, removes the bottom 9% of the image to reduce the influence of annotation banners, and resizes the remaining image for feature extraction. The descriptors combine:
 
-3. Build the classifier:
+1. **Intensity and histogram statistics** for grayscale appearance.
+2. **Multi-scale GLCM texture descriptors**, including contrast, dissimilarity, homogeneity, energy, and correlation at multiple distances and angles.
+3. **Radial 2D FFT energy** to describe spatial-frequency and surface-texture patterns.
+4. **Gabor filter responses** at multiple orientations and wavelengths.
+5. **Sobel gradient and Canny edge statistics** to characterize local edges and boundaries.
+6. **Shape and spatial descriptors**, including Hu moments and Local Binary Patterns (LBP).
 
-   ```powershell
-   python train.py
-   ```
+Four classifiers are trained and evaluated:
 
-   Training reads the labeled images from `SEM/Al/`, `SEM/Steel/`, and `SEM/Ti/`, extracts image features, evaluates the classifier with 5-fold stratified cross-validation, and writes the trained model to `artifacts/material_classifier.joblib`. Each class needs at least five images.
+- **Calibrated soft-voting ensemble (default):** combines a scaled/calibrated Ridge classifier, Logistic Regression, and linear SVM.
+- **Deep MLP:** a scaled multilayer perceptron.
+- **ExtraTrees:** an ensemble of randomized decision trees.
+- **Random Forest:** a 150-tree random forest.
 
-4. Start the web app:
+The trained model bundle, including all four classifiers and their evaluation metrics, is written to `artifacts/material_classifier.joblib`. This generated artifact is ignored by Git and is created locally by the training command or automatically on first app startup if it is missing.
 
-   ```powershell
-   python -m uvicorn app:app --reload
-   ```
+The repository also includes `train14/best.pt` and related plots from a YOLOv8 object-detection experiment. Those files and the YOLO notebook are separate from the web application's scikit-learn image classifier; the web app does not load `train14/best.pt`.
 
-   Open <http://127.0.0.1:8000> in your browser. If the model artifact does not exist, the app trains and saves it when it starts; run `python train.py` first to build it explicitly. Stop the local server with **Ctrl+C**.
+## Validation results
 
-### Web Interface Features
+The saved classifier reports **95.56% accuracy** for the default ensemble using **five-fold stratified cross-validation** on the included **45 images** (15 per class). Each sample is held out for prediction in one fold; metrics below are aggregated across those out-of-fold predictions.
 
-- **High-Readability Modern UI**: Built with Plus Jakarta Sans and JetBrains Mono typography, meeting high contrast standards for maximum legibility and visibility.
-- **1-Click Quick-Test Gallery**: Directly test 15 built-in micrographs across AlSiMg, 316L Stainless Steel, and TiAlV with a single click.
-- **Interactive Region Proposals**: Candidate particle bounding boxes, centroids, and areas mapped dynamically with synchronized row selection.
-- **Live Verification Dashboard**: Displays real-time 5-fold cross-validation confusion matrix, precision/recall/F1 breakdowns, and sample counts.
-- **Batch Processing**: Supports dragging and dropping up to 20 images (up to 50 MB) simultaneously with distribution breakdown.
+### Classifier comparison
 
-The original notebooks, contour tables, object summaries, and training artifacts remain available for further experiments.
+| Classifier | Cross-validation accuracy |
+| --- | ---: |
+| Calibrated soft-voting ensemble (default) | **95.56%** |
+| Deep MLP | 93.33% |
+| ExtraTrees | 86.67% |
+| Random Forest | 75.56% |
+
+### Default ensemble: per-class results
+
+| Actual material | Precision | Recall | F1-score | Support |
+| --- | ---: | ---: | ---: | ---: |
+| 316L Stainless Steel | 100.00% | 93.33% | 96.55% | 15 |
+| AlSiMg | 93.33% | 93.33% | 93.33% | 15 |
+| TiAlV | 93.75% | 100.00% | 96.77% | 15 |
+| **Macro average** | **95.69%** | **95.56%** | **95.55%** | **45** |
+
+### Default ensemble: confusion matrix
+
+Rows are actual labels and columns are predicted labels. Class order is 316L Stainless Steel, AlSiMg, TiAlV.
+
+| Actual \ Predicted | 316L Stainless Steel | AlSiMg | TiAlV |
+| --- | ---: | ---: | ---: |
+| 316L Stainless Steel | 14 | 1 | 0 |
+| AlSiMg | 0 | 14 | 1 |
+| TiAlV | 0 | 0 | 15 |
+
+These are cross-validation estimates on a small dataset, not performance guarantees on new instruments, powder batches, acquisition conditions, or image-processing workflows. The trainable pipeline uses fixed image-level folds; near-duplicate or related images across folds can cause leakage. Use independent batches and instruments for a stronger assessment before relying on the model.
+
+## Installation and build
+
+### Requirements
+
+- Python **3.10 or newer** (the project README has been tested with Python 3.13).
+- Git to clone the repository.
+- The SEM images under `SEM/` to train the classifier.
+- No Node.js or frontend build tool is needed.
+
+Dependencies are listed in [`requirements.txt`](./requirements.txt). OpenCV is installed as the headless package because the web app does not require OpenCV's desktop GUI.
+
+### Windows PowerShell
+
+```powershell
+git clone https://github.com/Odin531/sem-powder-particle-classification.git
+cd sem-powder-particle-classification
+
+py -3 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+If the Python launcher does not find the desired version, install Python 3.10+ and create the environment with `python -m venv .venv` instead.
+
+### macOS or Linux
+
+```bash
+git clone https://github.com/Odin531/sem-powder-particle-classification.git
+cd sem-powder-particle-classification
+
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+### Train the classifier
+
+From the repository root with the virtual environment active, run:
+
+```bash
+python train.py
+```
+
+The command loads the labeled images from the three `SEM/` class folders, extracts features, evaluates all four classifiers with five-fold stratified cross-validation, fits the models on the full dataset, and saves the model bundle to:
+
+```text
+artifacts/material_classifier.joblib
+```
+
+Training can take a while because the cross-validation evaluates multiple models and image feature extraction is CPU-intensive. The script prints the saved model location and the default ensemble's evaluation metrics when it completes.
+
+### Start the web server
+
+```bash
+python -m uvicorn app:app --reload
+```
+
+Open <http://127.0.0.1:8000> in a browser. The first startup trains the model automatically if the artifact does not exist, so running `python train.py` first makes startup behavior explicit. Stop the development server with **Ctrl+C**.
+
+For a local deployment without automatic code reload, omit `--reload`:
+
+```bash
+python -m uvicorn app:app
+```
+
+## Using the web application
+
+1. Start the server and open <http://127.0.0.1:8000>.
+2. Choose whole-image or single-particle crop mode.
+3. Select the default calibrated ensemble or another trained classifier.
+4. Upload an SEM image, select a reference sample, or submit a batch.
+5. Review the predicted material, probabilities, proposed particle regions, and model explanation. Compare these outputs with trusted laboratory analysis rather than treating them as certification.
+
+The interface also provides reference specimens from the included dataset and a metrics dashboard with the saved cross-validation results. Uploaded-image classification accepts files up to 15 MB and dimensions up to 20 megapixels. Batch uploads are limited to 20 files and 50 MB total.
+
+## HTTP API
+
+The FastAPI service exposes interactive API documentation at <http://127.0.0.1:8000/docs> while the server is running.
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /api/health` | Reports whether the model is loaded, available classifier names, and the training sample count. |
+| `GET /api/metrics` | Returns saved cross-validation metrics, including model comparison, per-class results, and confusion matrices. |
+| `GET /api/samples` | Lists the reference SEM specimens available to the gallery. |
+| `GET /api/samples/{folder}/{filename}` | Returns a bundled reference specimen image. |
+| `POST /api/predict?model=ensemble` | Classifies one uploaded image. Send a multipart form field named `file`; `model` is optional. |
+| `POST /api/predict/particle?model=ensemble` | Classifies a cropped particle image. Send a multipart form field named `file`; `model` is optional. |
+| `POST /api/predict/batch` | Classifies multiple images. Send repeated multipart form fields named `files`. |
+
+The available model names are `ensemble`, `deep_mlp`, `extra_trees`, and `random_forest`. A single-image request can be tested with `curl`:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/predict?model=ensemble" \
+  -F "file=@SEM/Al/Al0001.jpg"
+```
+
+Batch request example:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/predict/batch" \
+  -F "files=@SEM/Al/Al0001.jpg" \
+  -F "files=@SEM/Steel/steel0001.jpg"
+```
+
+## Repository guide
+
+| Path | Description |
+| --- | --- |
+| `app.py` | FastAPI server, upload validation, prediction endpoints, particle analysis, and metrics endpoints. |
+| `powder_ml.py` | Feature extraction, training-data loading, classifier definitions, evaluation, and model serialization. |
+| `train.py` | Command-line entry point to train and save the web application's model bundle. |
+| `requirements.txt` | Python runtime dependencies. |
+| `static/` | Browser interface: HTML, CSS, and JavaScript served by FastAPI. |
+| `SEM/` | Labeled SEM images used for training and the reference gallery. |
+| `Cropping.ipynb` | Notebook for cropping labeled particle fragments from SEM images. |
+| `Pipeline.ipynb` | Notebook implementing the HCF+PCA+XGBoost research pipeline. |
+| `YOLO.ipynb` | Notebook for the separate YOLOv8 particle-detection experiment. |
+| `contour_coordinates_*.csv` | Particle contour coordinates for the corresponding material dataset. |
+| `objects_summary_*.xlsx` | Spreadsheet summaries of particles in the corresponding material dataset. |
+| `train14/` | YOLOv8 training weights, configuration, and plots; separate from the web classifier model. |
+| `artifacts/material_classifier.joblib` | Generated scikit-learn model bundle; created by training and not committed. |
+
+## Troubleshooting
+
+- **Python version unavailable:** Check `python --version` (or `py -0p` on Windows), then create the virtual environment using an installed Python version 3.10 or newer.
+- **PowerShell blocks activation:** Either permit activation for the current PowerShell process with `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`, then activate again, or run the environment's interpreter directly as `.\.venv\Scripts\python.exe`.
+- **Missing Python module:** Confirm the virtual environment is active and run `pip install -r requirements.txt` from the repository root.
+- **Training says a class is missing or has too few images:** Ensure each of `SEM/Al/`, `SEM/Steel/`, and `SEM/Ti/` exists and contains at least five readable image files.
+- **An image cannot be analyzed:** Use a readable image file, check that it is within the size and pixel limits, and retry. Standard upload prediction supports files no larger than 15 MB and images no larger than 20 megapixels.
+- **Model metrics or predictions are unavailable:** Wait for model loading/training to complete and check `GET /api/health`. Inspect the server terminal for the original error if startup fails.
+- **Results differ from the reported scores:** Retraining evaluates the current dataset contents. Changes to images, installed library versions, or preprocessing code can change the metrics.
+
+## Limitations
+
+- The web classifier is trained on a small, fixed dataset of 45 images. Its cross-validation result may not generalize to other microscopes, magnifications, preparation methods, powder lots, or imaging conditions.
+- The classifier estimates one material label per submitted image. It is not a validated per-particle material detector or composition analyzer.
+- Automatically proposed regions and particle metrics are derived from image pixels. Without scale calibration, diameters and areas are not physical units; segmentation can miss, split, or merge particles.
+- Probability scores and the out-of-distribution threshold are model outputs, not calibrated guarantees that an image is familiar or a prediction is correct.
+- Material specifications shown in the interface are informational labels only. This software does not certify alloy composition, biocompatibility, regulatory compliance, or fitness for a clinical or manufacturing use.
+- The bundled YOLOv8 weights belong to a separate detection experiment and are not the model used by the web application's classifier.
